@@ -1,7 +1,32 @@
-Две медицинские модели на базе Qwen2.5-3B-Instruct
+# Med Assistant on Qwen2.5-3B · два full fine-tune + joint-пайплайн
+
+> **EN.** Two independently fine-tuned Qwen2.5-3B-Instruct models for a medical
+> assistant: patient triage & doctor routing, and chain-of-thought clinical
+> reasoning — served together behind one FastAPI endpoint, with a reproducible
+> benchmark harness (base vs fine-tuned vs pipelines). Solo project, trained
+> locally on a single RTX 3090.
 
 Две **полностью независимые** модели, обученные полным файнтюном от общей базы
 `Qwen2.5-3B-Instruct/`, плюс API-сервер для их раздельного и совместного использования.
+
+## Результаты в двух таблицах
+
+Полный файнтюн даёт прирост против базовой модели на всех ключевых метриках:
+
+| Метрика (test-сплиты датасетов) | Base Qwen2.5-3B | Fine-tuned |
+|---|---|---|
+| Routing accuracy (модель №1) | 0.00 | **0.48**, joint-пайплайн — **0.64** |
+| Диалоговый ответ, ROUGE-L (модель №1) | 0.142 | **0.294** (+107%) |
+| Клинический итог, final-F1 (модель №2) | 0.223 | **0.329** (+47%) |
+| CoT-формат ответа («Рассуждение → Итог») | 0.00 | **1.00** |
+| Safety violations (запрещённые советы) | — | **0** у всех участников |
+
+Внешний бенчмарк (не датасетные вопросы): routing **0.667**, fact recall
+0.55–0.57 у одиночных моделей. DPO-этап для CoT-модели проверен отдельно —
+прибыли не дал и **в продакшн не рекомендуется** (решение по метрикам, не по вкусу).
+
+Подробные таблицы: `runs/benchmark_report_ext6.md`, `runs/benchmark_ds_report.md`,
+`REPORT.md`.
 
 | Модель | Датасет | Назначение |
 |---|---|---|
@@ -10,6 +35,47 @@
 
 Железо, на котором проект рассчитан работать: 1× RTX 3090 24 ГБ, Python 3.12, venv `.venv`.
 
+## Как это работает
+
+```mermaid
+flowchart LR
+    Q["Вопрос пользователя"] --> D["med-dialogue-3b<br/>триаж + маршрут<br/>к специалисту"]
+    Q --> C["med-cot-3b<br/>клиническое рассуждение<br/>### Итоговый ответ"]
+    D --> J{"/api/joint"}
+    C --> J
+    J --> P["patient-friendly ответ:<br/>перевод заключения<br/>обратно в пациентский тон"]
+```
+
+- `/api/dialogue` — пациент спрашивает по-простому, модель называет вероятные
+  причины и специалиста;
+- `/api/cot` — клинический вопрос, модель рассуждает шагами и выдаёт итог;
+- `/api/joint` — конвейер №1 → №2 → №1: рассуждение «врачом» скрыто от пациента.
+
+## Быстрый старт
+
+```bash
+# 1. Окружение
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 2. Самотест движка: unsloth full FT, 1 микрошаг (~2 мин, ~20 ГБ VRAM)
+.venv/bin/python scripts/check_engine.py        # ждём строку "ENGINE OK"
+
+# 3. Обучение (модели независимы, №2 — после №1)
+.venv/bin/python scripts/train.py --preset dialogues
+.venv/bin/python scripts/train.py --preset cot
+
+# 4. Оценка и сервер (обе модели в памяти, ~12,4 ГБ VRAM)
+.venv/bin/python scripts/evaluate.py --model models/med-dialogue-3b --preset dialogues
+.venv/bin/uvicorn inference.server:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+curl -s -X POST 127.0.0.1:8000/api/joint -H 'Content-Type: application/json' \
+  -d '{"question": "Мучает изжога по ночам, что делать?"}'
+```
+
+Swagger UI: <http://127.0.0.1:8000/docs>.
+
 ## Структура
 
 ```
@@ -17,11 +83,14 @@ Qwen2.5-3B-Instruct/              # общая база (не изменяетс
 scripts/prepare_data.py           # датасеты -> data/*.jsonl (все колонки, train/val/test)
 scripts/check_engine.py           # самотест движка обучения (unsloth full FT)
 scripts/train.py                  # полный SFT-файнтюн (unsloth | transformers)
+scripts/train_dpo.py              # опциональный LoRA-DPO + слияние (CoT-модель)
 scripts/evaluate.py               # test loss + примеры генераций
+scripts/benchmark.py              # внешний бенчмарк: base vs fine-tuned vs пайплайны
+scripts/benchmark_ds.py           # бенчмарк на test-сплитах датасетов
 inference/server.py               # FastAPI: /api/dialogue, /api/cot, /api/joint, /api/health
 inference/client.py               # CLI-клиент сервера
 data/                             # подготовленные выборки + cot_dpo_reserved.jsonl
-runs/                             # логи обучения и отчёты оценки
+runs/                             # логи обучения, отчёты оценки и бенчмарков
 models/med-dialogue-3b/           # полная модель №1
 models/med-cot-3b/                # полная модель №2
 ```
@@ -29,9 +98,7 @@ models/med-cot-3b/                # полная модель №2
 ## Полный пайплайн (команды из корня проекта)
 
 ```bash
-cd /home/sgv/Desktop/Dev/AI_Dev/AI_Dev_Qwen2.5-3B_Diagnosis-training
-
-# 0. Самотест движка: unsloth полный файнтюн, 1 микрошаг (~2 мин, ~20 ГБ VRAM)
+# 0. Самотест движка
 .venv/bin/python scripts/check_engine.py          # ждём строку "ENGINE OK"
 
 # 1. Подготовка данных (уже выполнена; повторить можно в любой момент)
@@ -51,13 +118,13 @@ PYTHONUNBUFFERED=1 .venv/bin/python scripts/train.py --preset cot 2>&1 | tee run
 #     из data/cot_dpo_reserved.jsonl; на выходе полная модель med-cot-3b-dpo.
 #     Полный файнтюн-DPO не влезает в 24 ГБ (нужна референсная копия), поэтому
 #     этап реализован как LoRA-DPO + слияние.
-#     PYTHONUNBUFFERED=1 обязателен при пайпе в tee: без него метрики (loss/lr)
+#     PYTHONUNBUFFERED обязателен при пайпе в tee: без него метрики (loss/lr)
 #     буферизуются и попадают в лог только к концу обучения — а монитор
 #     ~/bin/sysmon читает их именно из лога.
 PYTHONUNBUFFERED=1 .venv/bin/python scripts/train_dpo.py --model models/med-cot-3b
 .venv/bin/python scripts/evaluate.py --model models/med-cot-3b-dpo --preset cot
 
-# 5. Сервер (обе модели в памяти, ~12,4 ГБ VRAM)
+# 5. Сервер
 .venv/bin/uvicorn inference.server:app --host 127.0.0.1 --port 8000
 ```
 
@@ -100,27 +167,6 @@ PYTHONUNBUFFERED=1 .venv/bin/python scripts/train_dpo.py --model models/med-cot-
 Отчёт: `runs/benchmark_report.md`, все ответы для ручного разбора —
 `runs/benchmark_answers.json`. Занимает ~15–30 мин на участника.
 
-## Итоговые результаты бенчмарков
-
-Внешний (fact_qa, routing из test, формат): dialogue routing **0.667** (base 0.0,
-no-line 1.0); cot/cot_dpo формат **1.0** (base 0.0); safety violations **0 у всех**;
-fact recall 0.55–0.57 у одиночных моделей, у комбинаций ниже (0.42–0.47) —
-финальный пациентский шаг и медикаментозный предохранитель сознательно
-опускают specifics. Полные таблицы: `runs/benchmark_report_ext6.md`.
-
-На данных датасетов (test-сплиты, эталонные ответы): специализация подтверждена
-перекрёстной матрицей — dialogue: dialog ROUGE-L **0.294** (base 0.142, +107%);
-cot: cot final-F1 **0.329** (base 0.223, +47%); **joint — лучший маршрутизатор
-(0.64 против 0.48 у одиночной dialogue)**; cot_dpo ≈ cot (прибыли нет,
-CJK-стабильность чуть хуже) — **DPO-этап в продакшн не рекомендуется**.
-Полная таблица: `runs/benchmark_ds_report.md`.
-
-Остаточные ограничения (пути решения): фактология отдельных препаратов неустойчива
-(RAG с проверяемой базой; больше эпох/данных; якорный NLL-лосс в DPO),
-редкие CJK-вставки на длинных CoT (logit-бан иероглифов; больше русских данных),
-протечка роли в переформулировке (ужесточение промпта).
-
-
 ### Бенчмарк на данных датасетов (test-сплиты, модели их не видели)
 
 `scripts/benchmark_ds.py` — парный к внешнему: эталоны берутся из самих датасетов
@@ -139,7 +185,6 @@ CJK-стабильность чуть хуже) — **DPO-этап в прода
 `runs/benchmark_ds_answers.json`. Токены сравниваются точно (без стемминга) —
 морфологические вариации занижают баллы равномерно у всех участников, на ранжирование
 не влияют.
-
 
 ## API сервера
 
@@ -163,8 +208,8 @@ curl -s -X POST 127.0.0.1:8000/api/joint -H 'Content-Type: application/json' \
 .venv/bin/python inference/client.py --mode joint --question "Мучает изжога по ночам, что делать?"
 ```
 
-Swagger UI: http://127.0.0.1:8000/docs. Генерации сериализованы одной GPU
-(`gpu_lock`), совместный режим занимает ~30–90 с (три генерации подряд).
+Генерации сериализованы одной GPU (`gpu_lock`), совместный режим занимает
+~30–90 с (три генерации подряд).
 
 ## Решения, заложенные в подготовку данных
 
@@ -185,5 +230,6 @@ Swagger UI: http://127.0.0.1:8000/docs. Генерации сериализов�
 - Оба датасета синтетические и не проверены врачами; модель **нельзя использовать
   для реальной постановки диагнозов** (дисклеймер автора medical_cot_rus).
 - Лицензия medical_cot_rus неоднозначна (apache-2.0 в сайдбаре против «other»
-  в карточке) — не публиковать полученные модели без уточнения у автора датасета.
+  в карточке) — веса моделей не публикуются до уточнения у автора датасета;
+  код репозитория распространяется как есть, в исследовательских целях.
 - Обучено для образовательных/исследовательских целей.
