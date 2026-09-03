@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Артефакты обучения: веса моделей (гигабайты), логи, кэш unsloth
+models/
+runs/
+runs_*.log
+unsloth_compiled_cache/
+
+# Мелочи окружения
+.idea/
+*.egg-info/
+
+persona_eldar/
+Qwen2.5-3B-Instruct/
+.idea/

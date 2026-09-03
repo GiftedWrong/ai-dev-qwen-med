@@ -1,0 +1,34 @@
+# AI_Dev_Qwen2.5-3B_Diagnosis-training — зависимости Python 3.12
+#
+# Порядок установки важен:
+#   1) python3 -m venv .venv
+#   2) torch ставится с CUDA-индекса (сборка cu130):
+#      .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu130
+#   3) затем остальное:
+#      .venv/bin/pip install -r requirements.txt
+#   Unsloth может скорректировать версии сопутствующих пакетов — это нормально.
+#
+# ВАЖНО (несовместимость TRL 0.24 + transformers 5.x): после установки требуется
+# два точечных патча в site-packages (иначе `from trl import DPOTrainer` падает):
+#   a) trl/import_utils.py — нормализовать флаги _*_available через bool(),
+#      т.к. transformers 5.x возвращает кортеж (bool, version) вместо bool;
+#   b) обернуть try/except импорт mergekit в trl/trainer/callbacks.py и
+#      llm_blender в trl/trainer/judges.py.
+
+# --- обучение (полный файнтюн + LoRA-DPO) ---
+unsloth==2026.8.21
+unsloth_zoo==2026.8.15
+transformers==5.5.0
+peft==0.20.0
+trl==0.24.0
+datasets==4.3.0
+accelerate==1.14.0
+bitsandbytes==0.50.1          # 8-битный AdamW для полного файнтюна в 24 ГБ
+safetensors==0.8.0
+tokenizers==0.22.2
+huggingface_hub==1.28.0
+numpy==2.5.2
+
+# --- инференс-сервер ---
+fastapi==0.141.1
+uvicorn==0.52.4
